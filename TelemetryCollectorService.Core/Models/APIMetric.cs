@@ -2,7 +2,7 @@ using System;
 
 namespace TelemetryCollectorService.Core.Models
 {
-    class APIMetrics : BaseMetric
+    class APIMetrics: BaseMetric
     {
         public int RPS {get;set;}
         public double Latency {get;set;}
