@@ -1,2 +1,5 @@
 <Solution>
+  <Project Path="TelemetryCollectorService.Agent/TelemetryCollectorService.Agent.csproj" />
+  <Project Path="TelemetryCollectorService.Core/TelemetryCollectorService.Core.csproj" />
+  <Project Path="TelemetryCollectorService.Sdk/TelemetryCollectorService.Sdk.csproj" />
 </Solution>
