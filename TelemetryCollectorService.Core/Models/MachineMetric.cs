@@ -1,16 +1,13 @@
 using System;
+using TelemetryCollectorService.Core.Interfaces;
 
 namespace TelemetryCollectorService.Core.Models
 {
-    
-    public abstract class BaseMetric
+    public class MachineMetrics: IMetricData
     {
         public Guid instanceId {get;set;}
         public DateTime Timestamp {get;set;}
         public string Environment {get;set;}
-    }
-    class MachineMetrics: BaseMetric
-    {
         public float CpuLoad {get;set;}
         public List<CoreLoad> CpuCoreLoads {get;set;} = new List<CoreLoad>();
 
@@ -23,8 +20,13 @@ namespace TelemetryCollectorService.Core.Models
         public float FreeDiskSpace {get;set;}
         public double WritingSpeed {get;set;}
         public double ReadingSpeed {get;set;}
+
+        public string ToString()
+        {
+            return $"{this.instanceId} | {this.Timestamp} | {this.RamLoad}";
+        }
     }
-    class CoreLoad
+    public class CoreLoad
     {
         public int CoreId {get;set;}
         public float Load {get;set;}
