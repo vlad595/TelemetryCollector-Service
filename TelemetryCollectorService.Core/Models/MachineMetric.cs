@@ -15,8 +15,8 @@ namespace TelemetryCollectorService.Core.Models
         public float RamLoad {get;set;}
         public int TotalRam {get;set;}
 
-        public double WiFiTx {get;set;}
-        public double WiFiRx {get;set;}
+        public float WiFiTx {get;set;}
+        public float WiFiRx {get;set;}
         public int OpenSockets {get;set;}
 
         public float FreeDiskSpace {get;set;}
@@ -30,7 +30,7 @@ namespace TelemetryCollectorService.Core.Models
             {
                 cpuLoad += $" / {core.CoreId} - {core.Load}";
             }
-            return $"{this.instanceId} | {this.Timestamp} | {this.TotalRam} / {this.RamLoad} | {this.CpuName} | {cpuLoad}";
+            return $"{this.instanceId} | {this.Timestamp} | {this.TotalRam} / {this.RamLoad} | {this.CpuName} | {cpuLoad} | {this.WiFiRx}/TxBps | {this.WiFiTx}/RxBps";
         }
     }
     public class CoreLoad

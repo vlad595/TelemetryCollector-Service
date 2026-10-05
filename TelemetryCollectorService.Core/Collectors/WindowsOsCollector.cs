@@ -3,6 +3,7 @@ using TelemetryCollectorService.Core.Interfaces;
 using TelemetryCollectorService.Core.Models;
 using System.Management;
 using System.Diagnostics;
+using System.Diagnostics.Metrics;
 
 namespace TelemetryCollectorService.Core.Collectors
 {
@@ -17,11 +18,13 @@ namespace TelemetryCollectorService.Core.Collectors
     {
         public string Name {get; set;} = "OS Windows";
         private string CpuName {get;set;}
-        private List<PerformanceCounter> _coreCounters = new();
+        private List<PerformanceCounter> _coreCounters;
+        private Dictionary<string, (PerformanceCounter Rx, PerformanceCounter Tx)> _networkCounters;
         public WindowsOsCollector()
         {
             CpuName = GetCpuName();
             _coreCounters = InitPerformanceCounters();
+            _networkCounters = InitNetAdaptersCounters();
         }
         public bool IsAvailable()
         {
@@ -31,6 +34,8 @@ namespace TelemetryCollectorService.Core.Collectors
         {
             Dictionary<string, ulong> ramMetrics = CollectRamMetrics();
             float ramLoad = (float)ramMetrics["usedMemory"] / ramMetrics["totalMemory"];
+
+            Dictionary<string, float> networkTraffic = CollectTxRx();
             return new MachineMetrics
             {
                 instanceId = Guid.NewGuid(),
@@ -39,7 +44,9 @@ namespace TelemetryCollectorService.Core.Collectors
                 RamLoad = (float)Math.Round(ramLoad, 2),
                 TotalRam = Convert.ToInt32(ramMetrics["totalMemory"]),
                 CpuName = CpuName,
-                CpuCoreLoads = GetCoreLoads()
+                CpuCoreLoads = GetCoreLoads(),
+                WiFiRx = networkTraffic["RxTraffic"],
+                WiFiTx = networkTraffic["TxTraffic"]
             };
         }
         private Dictionary<string, ulong> CollectRamMetrics()
@@ -105,6 +112,48 @@ namespace TelemetryCollectorService.Core.Collectors
             }
 
             return _coreCounters;
+        }
+        private Dictionary<string, (PerformanceCounter Rx, PerformanceCounter Tx)> InitNetAdaptersCounters()
+        {
+            var category = new PerformanceCounterCategory("Network Interface");
+            string[] instances = category.GetInstanceNames();
+
+            Dictionary<string, (PerformanceCounter Rx, PerformanceCounter Tx)> counters = new();
+
+            foreach (var instance in instances)
+            {
+                if (instance.Contains("Loopback", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+                var rxCounter = new PerformanceCounter("Network Interface", "Bytes Received/sec", instance);
+                var txCounter = new PerformanceCounter("Network Interface", "Bytes Sent/sec", instance);
+
+                rxCounter.NextValue();
+                txCounter.NextValue();
+
+                counters.Add(instance, (rxCounter, txCounter));
+            }
+            return counters;
+        }
+        private Dictionary<string, float> CollectTxRx()
+        {
+            float rx = 0f;
+            float tx = 0f;
+
+            Dictionary<string, float> values = new();
+            foreach(var counter in _networkCounters)
+            {
+                rx += counter.Value.Rx.NextValue();
+                tx += counter.Value.Tx.NextValue();
+            }
+            values.Add("TxTraffic", tx);
+            values.Add("RxTraffic", rx);
+            return values;
+        }
+        private Dictionary<string, string> CollectDiskMetrics()
+        {
+            return null;
         }
     }
 }
