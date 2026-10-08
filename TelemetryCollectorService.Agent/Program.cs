@@ -27,6 +27,12 @@ builder.Services.AddSingleton<HubConnection>(sp =>
         Process.Start(path);
     });
 
+    connection.On<string>("KillProcess", (id) =>
+    {
+        Process process = Process.GetProcessById(Convert.ToInt32(id));
+        process.Kill();
+    });
+
     return connection;
 });
 
