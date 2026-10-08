@@ -1,6 +1,7 @@
 using TelemetryCollectorService.Agent;
 using Microsoft.AspNetCore.SignalR.Client;
 using System.Text.Json.Nodes;
+using System.Diagnostics;
 
 var builder = Host.CreateApplicationBuilder(args);
 
@@ -11,13 +12,19 @@ string agentId = doc["agentId"]?.ToString() ?? Guid.NewGuid().ToString();
 builder.Services.AddSingleton<HubConnection>(sp =>
 {
     var connection = new HubConnectionBuilder()
-        .WithUrl("http://localhost:5034/Hub")
+        .WithUrl("https://vqgbf86r-5034.euw.devtunnels.ms/Hub")
         .WithAutomaticReconnect()
         .Build();
 
-    connection.On<string>("TurnOffPc", (time) =>
+    connection.On<string>("TurnOfPc", (time) =>
     {
-        Console.WriteLine($"Received turning off command. Time: {time}");
+        Console.WriteLine($"Received shutdown command. Time: {Convert.ToInt32(time) * 60}");
+        Process.Start("shutdown.exe", $"/s /t {Convert.ToInt32(time) * 60}");
+    });
+
+    connection.On<string>("ExecuteFile", (path) =>
+    {
+        Process.Start(path);
     });
 
     return connection;
