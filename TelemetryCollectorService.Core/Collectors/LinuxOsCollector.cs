@@ -1,10 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
-using System.Linq;
 using System.Net.NetworkInformation;
 using System.Runtime.Versioning;
-using System.Text.RegularExpressions;
 using TelemetryCollectorService.Core.Interfaces;
 using TelemetryCollectorService.Core.Models;
 
@@ -13,17 +11,16 @@ namespace TelemetryCollectorService.Core.Collectors
     [SupportedOSPlatform("linux")]
     public class LinuxOsCollector : IMetricCollctor<MachineMetrics>
     {
-        private Guid instanceId;
         public string Name { get; set; } = "OS Linux";
-        private string CpuName { get; set; }
+        private readonly string _cpuName;
 
-        private Dictionary<string, (ulong Idle, ulong Total)> _prevCpuStats = new();
+        private readonly Dictionary<string, (ulong Idle, ulong Total)> _prevCpuStats = new();
         private (ulong RxBytes, ulong TxBytes, DateTime Timestamp) _prevNetStats;
         private (ulong ReadBytes, ulong WriteBytes, DateTime Timestamp) _prevDiskStats;
 
-        private static readonly Regex WholeDiskRegex = new(
-            @"^(sd[a-z]+|vd[a-z]+|xvd[a-z]+|nvme\d+n\d+|mmcblk\d+)$",
-            RegexOptions.Compiled);
+        private float _cachedFreeDiskSpaceMb;
+        private DateTime _lastDiskSpaceCheck = DateTime.MinValue;
+        private static readonly TimeSpan DiskCacheTtl = TimeSpan.FromSeconds(30);
 
         private static readonly HashSet<string> IgnoredDriveFormats = new(StringComparer.OrdinalIgnoreCase)
         {
@@ -32,51 +29,48 @@ namespace TelemetryCollectorService.Core.Collectors
 
         public LinuxOsCollector()
         {
-            instanceId = Guid.NewGuid();
             if (!IsAvailable())
                 return;
 
-            CpuName = GetCpuName();
-
-            _prevCpuStats = ReadCpuRawStats();
+            _cpuName = GetCpuNameOnce();
+            UpdateCpuStats(out _, null);
             _prevNetStats = ReadNetRawStats();
             _prevDiskStats = ReadDiskRawStats();
         }
 
-        public bool IsAvailable()
-        {
-            return OperatingSystem.IsLinux();
-        }
+        public bool IsAvailable() => OperatingSystem.IsLinux();
 
         public MachineMetrics Collect()
         {
-            Dictionary<string, ulong> ramMetrics = CollectRamMetrics();
-            float ramLoad = ramMetrics["totalMemory"] > 0 ? (float)ramMetrics["usedMemory"] / ramMetrics["totalMemory"] : 0f;
+            if (!IsAvailable())
+                return null;
 
-            (float totalCpuLoad, List<CoreLoad> coreLoads) = CollectCpuLoads();
-            Dictionary<string, float> networkTraffic = CollectTxRx();
-            Dictionary<string, double> diskMetrics = CollectDiskMetrics();
+            (int totalRamMb, float ramLoad) = CollectRamFast();
+            var coreLoads = new List<CoreLoad>();
+            UpdateCpuStats(out float totalCpuLoad, coreLoads);
+            (float rxBps, float txBps) = CollectTxRxFast();
+            (float freeDiskMb, double readBps, double writeBps) = CollectDiskMetricsFast();
 
             return new MachineMetrics
             {
-                instanceId = instanceId,
+                instanceId = Guid.NewGuid(),
                 Timestamp = DateTime.UtcNow,
                 Environment = "Prod",
-                CpuName = CpuName,
+                CpuName = _cpuName,
                 CpuLoad = totalCpuLoad,
                 CpuCoreLoads = coreLoads,
-                RamLoad = (float)Math.Round(ramLoad, 2),
-                TotalRam = Convert.ToInt32(ramMetrics["totalMemory"]),
-                WiFiRx = networkTraffic["RxTraffic"],
-                WiFiTx = networkTraffic["TxTraffic"],
-                OpenSockets = CollectOpenSockets(),
-                FreeDiskSpace = (float)diskMetrics["freeSpaceMb"],
-                ReadingSpeed = diskMetrics["readBytesPerSec"],
-                WritingSpeed = diskMetrics["writeBytesPerSec"]
+                RamLoad = ramLoad,
+                TotalRam = totalRamMb,
+                WiFiRx = rxBps,
+                WiFiTx = txBps,
+                OpenSockets = CollectOpenSocketsFast(),
+                FreeDiskSpace = freeDiskMb,
+                ReadingSpeed = readBps,
+                WritingSpeed = writeBps
             };
         }
 
-        private string GetCpuName()
+        private static string GetCpuNameOnce()
         {
             const string cpuInfoPath = "/proc/cpuinfo";
             if (!File.Exists(cpuInfoPath))
@@ -88,23 +82,20 @@ namespace TelemetryCollectorService.Core.Collectors
                     line.StartsWith("Processor", StringComparison.OrdinalIgnoreCase) ||
                     line.StartsWith("Hardware", StringComparison.OrdinalIgnoreCase))
                 {
-                    int colonIndex = line.IndexOf(':');
-                    if (colonIndex >= 0 && colonIndex + 1 < line.Length)
-                    {
-                        return line[(colonIndex + 1)..].Trim();
-                    }
+                    int idx = line.IndexOf(':');
+                    if (idx >= 0 && idx + 1 < line.Length)
+                        return line[(idx + 1)..].Trim();
                 }
             }
             return "Unknown CPU";
         }
 
-        private Dictionary<string, (ulong Idle, ulong Total)> ReadCpuRawStats()
+        private void UpdateCpuStats(out float totalLoad, List<CoreLoad> coreLoads)
         {
-            var stats = new Dictionary<string, (ulong Idle, ulong Total)>();
+            totalLoad = 0f;
             const string statPath = "/proc/stat";
-
             if (!File.Exists(statPath))
-                return stats;
+                return;
 
             foreach (string line in File.ReadLines(statPath))
             {
@@ -116,7 +107,6 @@ namespace TelemetryCollectorService.Core.Collectors
                     continue;
 
                 string cpuId = parts[0];
-
                 ulong user = ulong.Parse(parts[1]);
                 ulong nice = ulong.Parse(parts[2]);
                 ulong system = ulong.Parse(parts[3]);
@@ -127,121 +117,100 @@ namespace TelemetryCollectorService.Core.Collectors
                 ulong steal = parts.Length > 8 ? ulong.Parse(parts[8]) : 0;
 
                 ulong idleAll = idle + iowait;
-                ulong nonIdle = user + nice + system + irq + softirq + steal;
-                ulong total = idleAll + nonIdle;
+                ulong total = idleAll + user + nice + system + irq + softirq + steal;
 
-                stats[cpuId] = (idleAll, total);
-            }
-
-            return stats;
-        }
-
-        private (float TotalLoad, List<CoreLoad> CoreLoads) CollectCpuLoads()
-        {
-            var currentStats = ReadCpuRawStats();
-            var coreLoads = new List<CoreLoad>();
-            float totalLoad = 0f;
-
-            foreach (var (cpuId, current) in currentStats)
-            {
                 float load = 0f;
                 if (_prevCpuStats.TryGetValue(cpuId, out var prev))
                 {
-                    ulong totalDiff = current.Total - prev.Total;
-                    ulong idleDiff = current.Idle - prev.Idle;
-
+                    ulong totalDiff = total - prev.Total;
+                    ulong idleDiff = idleAll - prev.Idle;
                     if (totalDiff > 0)
-                    {
                         load = (float)Math.Round((double)(totalDiff - idleDiff) / totalDiff, 2);
-                    }
                 }
 
-                if (cpuId.Equals("cpu", StringComparison.OrdinalIgnoreCase))
+                _prevCpuStats[cpuId] = (idleAll, total);
+
+                if (cpuId.Length == 3)
                 {
                     totalLoad = load;
                 }
-                else
+                else if (coreLoads != null)
                 {
                     coreLoads.Add(new CoreLoad
                     {
-                        CoreId = cpuId.Replace("cpu", ""),
+                        CoreId = cpuId[3..],
                         Load = load
                     });
                 }
             }
-
-            _prevCpuStats = currentStats;
-            return (totalLoad, coreLoads);
         }
 
-        private Dictionary<string, ulong> CollectRamMetrics()
+        private static (int TotalRamMb, float RamLoad) CollectRamFast()
         {
-            ulong totalKb = 0;
-            ulong availableKb = 0;
-            ulong freeKb = 0;
-            ulong buffersKb = 0;
-            ulong cachedKb = 0;
-
+            ulong totalKb = 0, availKb = 0, freeKb = 0, buffersKb = 0, cachedKb = 0;
             const string memInfoPath = "/proc/meminfo";
+
             if (File.Exists(memInfoPath))
             {
                 foreach (string line in File.ReadLines(memInfoPath))
                 {
                     if (line.StartsWith("MemTotal:"))
-                        totalKb = ParseMemInfoValue(line);
+                        totalKb = ParseKb(line);
                     else if (line.StartsWith("MemAvailable:"))
-                        availableKb = ParseMemInfoValue(line);
+                        availKb = ParseKb(line);
                     else if (line.StartsWith("MemFree:"))
-                        freeKb = ParseMemInfoValue(line);
+                        freeKb = ParseKb(line);
                     else if (line.StartsWith("Buffers:"))
-                        buffersKb = ParseMemInfoValue(line);
+                        buffersKb = ParseKb(line);
                     else if (line.StartsWith("Cached:"))
-                        cachedKb = ParseMemInfoValue(line);
+                        cachedKb = ParseKb(line);
+
+                    if (totalKb > 0 && availKb > 0)
+                        break;
                 }
             }
 
-            if (availableKb == 0)
-            {
-                availableKb = freeKb + buffersKb + cachedKb;
-            }
+            if (availKb == 0)
+                availKb = freeKb + buffersKb + cachedKb;
 
-            ulong totalMemoryMb = totalKb / 1024;
-            ulong freeMemoryMb = availableKb / 1024;
-            ulong usedMemoryMb = totalMemoryMb >= freeMemoryMb ? totalMemoryMb - freeMemoryMb : 0;
+            if (totalKb == 0)
+                return (0, 0f);
 
-            return new Dictionary<string, ulong>
-            {
-                { "totalMemory", totalMemoryMb },
-                { "freeMemory", freeMemoryMb },
-                { "usedMemory", usedMemoryMb }
-            };
+            ulong usedKb = totalKb >= availKb ? totalKb - availKb : 0;
+            int totalMb = (int)(totalKb / 1024UL);
+            float ramLoad = (float)Math.Round((double)usedKb / totalKb, 2);
+
+            return (totalMb, ramLoad);
         }
 
-        private static ulong ParseMemInfoValue(string line)
+        private static ulong ParseKb(string line)
         {
             string[] parts = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
             return parts.Length >= 2 && ulong.TryParse(parts[1], out ulong val) ? val : 0;
         }
 
-        private (ulong RxBytes, ulong TxBytes, DateTime Timestamp) ReadNetRawStats()
+        private static (ulong RxBytes, ulong TxBytes, DateTime Timestamp) ReadNetRawStats()
         {
-            ulong rxTotal = 0;
-            ulong txTotal = 0;
+            ulong rxTotal = 0, txTotal = 0;
             const string netDevPath = "/proc/net/dev";
 
             if (File.Exists(netDevPath))
             {
-                foreach (string line in File.ReadLines(netDevPath).Skip(2))
+                int lineIndex = 0;
+                foreach (string line in File.ReadLines(netDevPath))
                 {
-                    int colonIndex = line.IndexOf(':');
-                    if (colonIndex < 0)
+                    if (lineIndex++ < 2)
                         continue;
 
-                    string iface = line[..colonIndex].Trim();
+                    int colon = line.IndexOf(':');
+                    if (colon < 0)
+                        continue;
+
+                    ReadOnlySpan<char> iface = line.AsSpan(0, colon).Trim();
                     if (iface.Equals("lo", StringComparison.OrdinalIgnoreCase))
                         continue;
 
-                    string[] fields = line[(colonIndex + 1)..].Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                    string[] fields = line[(colon + 1)..].Split(' ', StringSplitOptions.RemoveEmptyEntries);
                     if (fields.Length >= 9 &&
                         ulong.TryParse(fields[0], out ulong rx) &&
                         ulong.TryParse(fields[8], out ulong tx))
@@ -255,36 +224,39 @@ namespace TelemetryCollectorService.Core.Collectors
             return (rxTotal, txTotal, DateTime.UtcNow);
         }
 
-        private Dictionary<string, float> CollectTxRx()
+        private (float RxBps, float TxBps) CollectTxRxFast()
         {
             var current = ReadNetRawStats();
-            double elapsedSeconds = (current.Timestamp - _prevNetStats.Timestamp).TotalSeconds;
+            double elapsed = (current.Timestamp - _prevNetStats.Timestamp).TotalSeconds;
+            float rxBps = 0f, txBps = 0f;
 
-            float rxBps = 0f;
-            float txBps = 0f;
-
-            if (elapsedSeconds > 0)
+            if (elapsed > 0)
             {
                 if (current.RxBytes >= _prevNetStats.RxBytes)
-                    rxBps = (float)Math.Round((current.RxBytes - _prevNetStats.RxBytes) / elapsedSeconds, 2);
+                    rxBps = (float)Math.Round((current.RxBytes - _prevNetStats.RxBytes) / elapsed, 2);
 
                 if (current.TxBytes >= _prevNetStats.TxBytes)
-                    txBps = (float)Math.Round((current.TxBytes - _prevNetStats.TxBytes) / elapsedSeconds, 2);
+                    txBps = (float)Math.Round((current.TxBytes - _prevNetStats.TxBytes) / elapsed, 2);
             }
 
             _prevNetStats = current;
-
-            return new Dictionary<string, float>
-            {
-                { "RxTraffic", rxBps },
-                { "TxTraffic", txBps }
-            };
+            return (rxBps, txBps);
         }
 
-        private (ulong ReadBytes, ulong WriteBytes, DateTime Timestamp) ReadDiskRawStats()
+        private static bool IsWholePhysicalDisk(string dev)
         {
-            ulong readSectors = 0;
-            ulong writeSectors = 0;
+            if (dev.StartsWith("sd") || dev.StartsWith("vd") || dev.StartsWith("xvd"))
+                return !char.IsDigit(dev[^1]);
+
+            if (dev.StartsWith("nvme") || dev.StartsWith("mmcblk"))
+                return !dev.Contains('p');
+
+            return false;
+        }
+
+        private static (ulong ReadBytes, ulong WriteBytes, DateTime Timestamp) ReadDiskRawStats()
+        {
+            ulong readSectors = 0, writeSectors = 0;
             const string diskStatsPath = "/proc/diskstats";
 
             if (File.Exists(diskStatsPath))
@@ -292,18 +264,13 @@ namespace TelemetryCollectorService.Core.Collectors
                 foreach (string line in File.ReadLines(diskStatsPath))
                 {
                     string[] parts = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-                    if (parts.Length < 10)
+                    if (parts.Length < 10 || !IsWholePhysicalDisk(parts[2]))
                         continue;
 
-                    string devName = parts[2];
-                    if (!WholeDiskRegex.IsMatch(devName))
-                        continue;
-
-                    if (ulong.TryParse(parts[5], out ulong rSectors) &&
-                        ulong.TryParse(parts[9], out ulong wSectors))
+                    if (ulong.TryParse(parts[5], out ulong r) && ulong.TryParse(parts[9], out ulong w))
                     {
-                        readSectors += rSectors;
-                        writeSectors += wSectors;
+                        readSectors += r;
+                        writeSectors += w;
                     }
                 }
             }
@@ -311,81 +278,61 @@ namespace TelemetryCollectorService.Core.Collectors
             return (readSectors * 512UL, writeSectors * 512UL, DateTime.UtcNow);
         }
 
-        private Dictionary<string, double> CollectDiskMetrics()
+        private (float FreeSpaceMb, double ReadBps, double WriteBps) CollectDiskMetricsFast()
         {
-            long freeBytes = 0;
-            var seenTotals = new HashSet<long>();
-
-            foreach (DriveInfo drive in DriveInfo.GetDrives())
+            DateTime now = DateTime.UtcNow;
+            if (now - _lastDiskSpaceCheck >= DiskCacheTtl)
             {
-                try
+                long freeBytes = 0;
+                var seenTotals = new HashSet<long>();
+
+                foreach (DriveInfo drive in DriveInfo.GetDrives())
                 {
-                    if (!drive.IsReady || drive.DriveType != DriveType.Fixed)
-                        continue;
-
-                    if (IgnoredDriveFormats.Contains(drive.DriveFormat))
-                        continue;
-
-                    if (drive.TotalSize > 0 && seenTotals.Add(drive.TotalSize))
+                    try
                     {
-                        freeBytes += drive.AvailableFreeSpace;
+                        if (!drive.IsReady || drive.DriveType != DriveType.Fixed || IgnoredDriveFormats.Contains(drive.DriveFormat))
+                            continue;
+
+                        if (drive.TotalSize > 0 && seenTotals.Add(drive.TotalSize))
+                            freeBytes += drive.AvailableFreeSpace;
                     }
+                    catch { }
                 }
-                catch
-                {
-                }
+
+                _cachedFreeDiskSpaceMb = (float)Math.Round(freeBytes / (1024.0 * 1024.0), 2);
+                _lastDiskSpaceCheck = now;
             }
 
             var currentDisk = ReadDiskRawStats();
-            double elapsedSeconds = (currentDisk.Timestamp - _prevDiskStats.Timestamp).TotalSeconds;
+            double elapsed = (currentDisk.Timestamp - _prevDiskStats.Timestamp).TotalSeconds;
+            double readSpeed = 0.0, writeSpeed = 0.0;
 
-            double readSpeed = 0.0;
-            double writeSpeed = 0.0;
-
-            if (elapsedSeconds > 0)
+            if (elapsed > 0)
             {
                 if (currentDisk.ReadBytes >= _prevDiskStats.ReadBytes)
-                    readSpeed = Math.Round((currentDisk.ReadBytes - _prevDiskStats.ReadBytes) / elapsedSeconds, 2);
+                    readSpeed = Math.Round((currentDisk.ReadBytes - _prevDiskStats.ReadBytes) / elapsed, 2);
 
                 if (currentDisk.WriteBytes >= _prevDiskStats.WriteBytes)
-                    writeSpeed = Math.Round((currentDisk.WriteBytes - _prevDiskStats.WriteBytes) / elapsedSeconds, 2);
+                    writeSpeed = Math.Round((currentDisk.WriteBytes - _prevDiskStats.WriteBytes) / elapsed, 2);
             }
 
             _prevDiskStats = currentDisk;
-
-            return new Dictionary<string, double>
-            {
-                { "freeSpaceMb", Math.Round(freeBytes / (1024.0 * 1024.0), 2) },
-                { "readBytesPerSec", readSpeed },
-                { "writeBytesPerSec", writeSpeed }
-            };
+            return (_cachedFreeDiskSpaceMb, readSpeed, writeSpeed);
         }
 
-        private int CollectOpenSockets()
+        private static int CollectOpenSocketsFast()
         {
             try
             {
-                IPGlobalProperties properties = IPGlobalProperties.GetIPGlobalProperties();
-                return properties.GetActiveTcpConnections().Length
-                     + properties.GetActiveTcpListeners().Length
-                     + properties.GetActiveUdpListeners().Length;
+                var props = IPGlobalProperties.GetIPGlobalProperties();
+                return props.GetActiveTcpConnections().Length
+                     + props.GetActiveTcpListeners().Length
+                     + props.GetActiveUdpListeners().Length;
             }
             catch
             {
-                return CountProcNetLines("/proc/net/tcp")
-                     + CountProcNetLines("/proc/net/tcp6")
-                     + CountProcNetLines("/proc/net/udp")
-                     + CountProcNetLines("/proc/net/udp6");
-            }
-        }
-
-        private static int CountProcNetLines(string path)
-        {
-            if (!File.Exists(path))
                 return 0;
-
-            int count = File.ReadLines(path).Count();
-            return count > 1 ? count - 1 : 0;
+            }
         }
     }
 }
