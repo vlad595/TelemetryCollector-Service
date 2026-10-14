@@ -24,7 +24,7 @@ builder.Services.AddSingleton<HubConnection>(sp =>
 
     connection.On<string>("ExecuteFile", (path) =>
     {
-        Process.Start(path);
+        Process.Start(new ProcessStartInfo(path) { UseShellExecute = true });
     });
 
     connection.On<string>("KillProcess", (id) =>

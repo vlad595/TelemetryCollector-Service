@@ -68,7 +68,9 @@ namespace TelemetryCollectorService.Core.Collectors
                 ReadingSpeed = diskTraffic["ReadingSpeed"],
                 WritingSpeed = diskTraffic["WritingSpeed"],
                 DiskCapacity = diskInf.TotalCapacity,
-                FreeDiskSpace = diskInf.FreeSpace
+                FreeDiskSpace = diskInf.FreeSpace,
+
+                SystemProcesses = GetTopProcesses(30)
             };
         }
         
@@ -285,9 +287,38 @@ namespace TelemetryCollectorService.Core.Collectors
             foreach (var counter in _networkCounters.Values) { counter.Rx.Dispose(); counter.Tx.Dispose(); }
             foreach (var counter in _diskCounters.Values) { counter.readingSpeed.Dispose(); counter.writingSpeed.Dispose(); }
             
-            // Звільняємо ресурси GPU
             foreach (var counter in _gpuLoadCounters.Values) counter.Dispose();
             foreach (var counter in _gpuRamCounters.Values) counter.Dispose();
+        }
+        private List<SysProcess> GetTopProcesses(int count = 10)
+        {
+            List<SysProcess> topProcesses = new();
+
+            try
+            {
+                Process[] processes = Process.GetProcesses();
+
+                var sortedProcesses = processes
+                    .OrderByDescending(p => p.WorkingSet64)
+                    .Take(count)
+                    .ToList();
+
+                foreach (var p in sortedProcesses)
+                {
+                    topProcesses.Add(new SysProcess
+                    {
+                        Name = p.ProcessName,
+                        Id = p.Id.ToString(),
+                        MemoryUsage = (float)Math.Round(p.WorkingSet64 / 1024f / 1024f, 2)
+                    });
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Помилка збору процесів: {ex.Message}");
+            }
+
+            return topProcesses;
         }
     }
 }
