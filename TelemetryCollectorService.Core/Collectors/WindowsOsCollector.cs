@@ -22,6 +22,7 @@ namespace TelemetryCollectorService.Core.Collectors
     [SupportedOSPlatform("windows")]
     public class WindowsOsCollector : IMetricCollctor<MachineMetrics>, IDisposable
     {
+        private Guid instanceId;
         public string Name { get; set; } = "OS Windows";
         private string CpuName { get; set; }
 
@@ -33,6 +34,7 @@ namespace TelemetryCollectorService.Core.Collectors
 
         public WindowsOsCollector()
         {
+            this.instanceId = Guid.NewGuid();
             if (!IsAvailable())
                 return;
 
@@ -64,7 +66,7 @@ namespace TelemetryCollectorService.Core.Collectors
 
             return new MachineMetrics
             {
-                instanceId = Guid.NewGuid(),
+                instanceId = this.instanceId,
                 Timestamp = DateTime.UtcNow,
                 Environment = "Prod",
                 CpuName = CpuName,
