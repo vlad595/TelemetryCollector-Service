@@ -2,123 +2,114 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
-using System.Linq;
 using System.Management;
 using System.Net.NetworkInformation;
+using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
 using TelemetryCollectorService.Core.Interfaces;
 using TelemetryCollectorService.Core.Models;
 
 namespace TelemetryCollectorService.Core.Collectors
 {
-    public class CpuDto
-    {
-        public string Name { get; set; }
-        public int NumberOfCores { get; set; }
-        public int NumberOfLogicalProcessors { get; set; }
-        public List<CoreLoad> CoreLoads { get; set; }
-    }
-
     [SupportedOSPlatform("windows")]
     public class WindowsOsCollector : IMetricCollctor<MachineMetrics>, IDisposable
     {
-        private Guid instanceId;
         public string Name { get; set; } = "OS Windows";
-        private string CpuName { get; set; }
+        private readonly string _cpuName;
 
         private PerformanceCounter _totalCpuCounter;
         private List<PerformanceCounter> _coreCounters;
-        private Dictionary<string, (PerformanceCounter Rx, PerformanceCounter Tx)> _networkCounters;
+        private List<(PerformanceCounter Rx, PerformanceCounter Tx)> _networkCounters;
         private PerformanceCounter _diskReadCounter;
         private PerformanceCounter _diskWriteCounter;
 
+        private readonly MEMORYSTATUSEX _memStatus = new();
+        private float _cachedFreeDiskSpaceMb;
+        private DateTime _lastDiskSpaceCheck = DateTime.MinValue;
+        private static readonly TimeSpan DiskCacheTtl = TimeSpan.FromSeconds(30);
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]
+        private class MEMORYSTATUSEX
+        {
+            public uint dwLength = (uint)Marshal.SizeOf(typeof(MEMORYSTATUSEX));
+            public uint dwMemoryLoad;
+            public ulong ullTotalPhys;
+            public ulong ullAvailPhys;
+            public ulong ullTotalPageFile;
+            public ulong ullAvailPageFile;
+            public ulong ullTotalVirtual;
+            public ulong ullAvailVirtual;
+            public ulong ullAvailExtendedVirtual;
+        }
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GlobalMemoryStatusEx([In, Out] MEMORYSTATUSEX lpBuffer);
+
         public WindowsOsCollector()
         {
-            this.instanceId = Guid.NewGuid();
             if (!IsAvailable())
                 return;
 
-            CpuName = GetCpuName();
+            _cpuName = GetCpuNameOnce();
             _coreCounters = InitPerformanceCounters();
             _networkCounters = InitNetAdaptersCounters();
             InitDiskCounters();
         }
 
-        public bool IsAvailable()
-        {
-            return OperatingSystem.IsWindows();
-        }
+        public bool IsAvailable() => OperatingSystem.IsWindows();
 
         public MachineMetrics Collect()
         {
-            Dictionary<string, ulong> ramMetrics = CollectRamMetrics();
-            float ramLoad = ramMetrics["totalMemory"] > 0
-                ? (float)ramMetrics["usedMemory"] / ramMetrics["totalMemory"]
-                : 0f;
+            if (!IsAvailable())
+                return null;
 
-            Dictionary<string, float> networkTraffic = CollectTxRx();
-            Dictionary<string, double> diskMetrics = CollectDiskMetrics();
-            List<CoreLoad> coreLoads = GetCoreLoads();
+            (int totalRamMb, float ramLoad) = CollectRamFast();
+            (float rxBps, float txBps) = CollectTxRxFast();
+            (float freeDiskMb, double readBps, double writeBps) = CollectDiskMetricsFast();
+            List<CoreLoad> coreLoads = GetCoreLoadsFast(out float avgCoreLoad);
 
             float totalCpuLoad = _totalCpuCounter != null
                 ? (float)Math.Round(_totalCpuCounter.NextValue() / 100f, 2)
-                : (coreLoads.Count > 0 ? (float)Math.Round(coreLoads.Average(c => c.Load), 2) : 0f);
+                : avgCoreLoad;
 
             return new MachineMetrics
             {
-                instanceId = this.instanceId,
+                instanceId = Guid.NewGuid(),
                 Timestamp = DateTime.UtcNow,
                 Environment = "Prod",
-                CpuName = CpuName,
+                CpuName = _cpuName,
                 CpuLoad = totalCpuLoad,
                 CpuCoreLoads = coreLoads,
-                RamLoad = (float)Math.Round(ramLoad, 2),
-                TotalRam = Convert.ToInt32(ramMetrics["totalMemory"]),
-                WiFiRx = networkTraffic["RxTraffic"],
-                WiFiTx = networkTraffic["TxTraffic"],
-                OpenSockets = CollectOpenSockets(),
-                FreeDiskSpace = (float)diskMetrics["freeSpaceMb"],
-                ReadingSpeed = diskMetrics["readBytesPerSec"],
-                WritingSpeed = diskMetrics["writeBytesPerSec"]
+                RamLoad = ramLoad,
+                TotalRam = totalRamMb,
+                WiFiRx = rxBps,
+                WiFiTx = txBps,
+                OpenSockets = CollectOpenSocketsFast(),
+                FreeDiskSpace = freeDiskMb,
+                ReadingSpeed = readBps,
+                WritingSpeed = writeBps
             };
         }
 
-        private Dictionary<string, ulong> CollectRamMetrics()
+        private (int TotalRamMb, float RamLoad) CollectRamFast()
         {
-            ulong totalMemory = 0;
-            ulong freeMemory = 0;
-            ulong usedMemory = 0;
-
-            string ramQuery = "SELECT FreePhysicalMemory, TotalVisibleMemorySize FROM Win32_OperatingSystem";
-            using (var ramSearcher = new ManagementObjectSearcher(ramQuery))
-            using (var results = ramSearcher.Get())
+            if (GlobalMemoryStatusEx(_memStatus) && _memStatus.ullTotalPhys > 0)
             {
-                foreach (ManagementObject mo in results)
-                {
-                    using (mo)
-                    {
-                        // Значення з WMI приходять у кілобайтах, переводимо в мегабайти
-                        totalMemory = Convert.ToUInt64(mo["TotalVisibleMemorySize"]) / 1024;
-                        freeMemory = Convert.ToUInt64(mo["FreePhysicalMemory"]) / 1024;
-                        usedMemory = totalMemory - freeMemory;
-                    }
-                }
+                ulong totalMb = _memStatus.ullTotalPhys / (1024UL * 1024UL);
+                ulong usedBytes = _memStatus.ullTotalPhys - _memStatus.ullAvailPhys;
+                float ramLoad = (float)Math.Round((double)usedBytes / _memStatus.ullTotalPhys, 2);
+                return ((int)totalMb, ramLoad);
             }
-
-            return new Dictionary<string, ulong>
-            {
-                { "totalMemory", totalMemory },
-                { "freeMemory", freeMemory },
-                { "usedMemory", usedMemory }
-            };
+            return (0, 0f);
         }
 
-        private string GetCpuName()
+        private static string GetCpuNameOnce()
         {
-            string query = "SELECT Name FROM Win32_Processor";
-            using (var searcher = new ManagementObjectSearcher(query))
-            using (var results = searcher.Get())
+            try
             {
+                using var searcher = new ManagementObjectSearcher("SELECT Name FROM Win32_Processor");
+                using var results = searcher.Get();
                 foreach (ManagementObject mo in results)
                 {
                     using (mo)
@@ -127,28 +118,38 @@ namespace TelemetryCollectorService.Core.Collectors
                     }
                 }
             }
+            catch
+            {
+                // Ігноруємо помилки WMI під час старту
+            }
             return "Unknown CPU";
         }
 
-        private List<CoreLoad> GetCoreLoads()
+        private List<CoreLoad> GetCoreLoadsFast(out float avgLoad)
         {
-            List<CoreLoad> coreLoads = new();
+            int count = _coreCounters.Count;
+            var coreLoads = new List<CoreLoad>(count);
+            float sum = 0f;
 
-            foreach (var counter in _coreCounters)
+            for (int i = 0; i < count; i++)
             {
-                float load = counter.NextValue();
+                var counter = _coreCounters[i];
+                float load = (float)Math.Round(counter.NextValue() / 100f, 2);
+                sum += load;
                 coreLoads.Add(new CoreLoad
                 {
                     CoreId = counter.InstanceName,
-                    Load = (float)Math.Round(load / 100f, 2)
+                    Load = load
                 });
             }
+
+            avgLoad = count > 0 ? (float)Math.Round(sum / count, 2) : 0f;
             return coreLoads;
         }
 
         private List<PerformanceCounter> InitPerformanceCounters()
         {
-            List<PerformanceCounter> coreCounters = new();
+            var coreCounters = new List<PerformanceCounter>();
             var category = new PerformanceCounterCategory("Processor");
             string[] instances = category.GetInstanceNames();
 
@@ -169,18 +170,16 @@ namespace TelemetryCollectorService.Core.Collectors
             return coreCounters;
         }
 
-        private Dictionary<string, (PerformanceCounter Rx, PerformanceCounter Tx)> InitNetAdaptersCounters()
+        private static List<(PerformanceCounter Rx, PerformanceCounter Tx)> InitNetAdaptersCounters()
         {
             var category = new PerformanceCounterCategory("Network Interface");
             string[] instances = category.GetInstanceNames();
-            Dictionary<string, (PerformanceCounter Rx, PerformanceCounter Tx)> counters = new();
+            var counters = new List<(PerformanceCounter Rx, PerformanceCounter Tx)>(instances.Length);
 
             foreach (var instance in instances)
             {
                 if (instance.Contains("Loopback", StringComparison.OrdinalIgnoreCase))
-                {
                     continue;
-                }
 
                 var rxCounter = new PerformanceCounter("Network Interface", "Bytes Received/sec", instance);
                 var txCounter = new PerformanceCounter("Network Interface", "Bytes Sent/sec", instance);
@@ -188,44 +187,23 @@ namespace TelemetryCollectorService.Core.Collectors
                 rxCounter.NextValue();
                 txCounter.NextValue();
 
-                counters.Add(instance, (rxCounter, txCounter));
+                counters.Add((rxCounter, txCounter));
             }
             return counters;
         }
 
-        private Dictionary<string, float> CollectTxRx()
+        private (float RxBps, float TxBps) CollectTxRxFast()
         {
             float rx = 0f;
             float tx = 0f;
 
-            foreach (var counter in _networkCounters.Values)
+            for (int i = 0; i < _networkCounters.Count; i++)
             {
-                rx += counter.Rx.NextValue();
-                tx += counter.Tx.NextValue();
+                rx += _networkCounters[i].Rx.NextValue();
+                tx += _networkCounters[i].Tx.NextValue();
             }
 
-            return new Dictionary<string, float>
-            {
-                { "TxTraffic", (float)Math.Round(tx, 2) },
-                { "RxTraffic", (float)Math.Round(rx, 2) }
-            };
-        }
-
-        private int CollectOpenSockets()
-        {
-            try
-            {
-                IPGlobalProperties properties = IPGlobalProperties.GetIPGlobalProperties();
-                int activeTcp = properties.GetActiveTcpConnections().Length;
-                int tcpListeners = properties.GetActiveTcpListeners().Length;
-                int udpListeners = properties.GetActiveUdpListeners().Length;
-
-                return activeTcp + tcpListeners + udpListeners;
-            }
-            catch
-            {
-                return 0;
-            }
+            return ((float)Math.Round(rx, 2), (float)Math.Round(tx, 2));
         }
 
         private void InitDiskCounters()
@@ -241,28 +219,40 @@ namespace TelemetryCollectorService.Core.Collectors
             }
         }
 
-        private Dictionary<string, double> CollectDiskMetrics()
+        private (float FreeSpaceMb, double ReadBps, double WriteBps) CollectDiskMetricsFast()
         {
-            long freeBytes = 0;
-
-            foreach (DriveInfo drive in DriveInfo.GetDrives())
+            DateTime now = DateTime.UtcNow;
+            if (now - _lastDiskSpaceCheck >= DiskCacheTtl)
             {
-                if (drive.IsReady && drive.DriveType == DriveType.Fixed)
+                long freeBytes = 0;
+                foreach (DriveInfo drive in DriveInfo.GetDrives())
                 {
-                    freeBytes += drive.AvailableFreeSpace;
+                    if (drive.IsReady && drive.DriveType == DriveType.Fixed)
+                        freeBytes += drive.AvailableFreeSpace;
                 }
+                _cachedFreeDiskSpaceMb = (float)Math.Round(freeBytes / (1024.0 * 1024.0), 2);
+                _lastDiskSpaceCheck = now;
             }
 
-            double freeSpaceMb = Math.Round(freeBytes / (1024.0 * 1024.0), 2);
             double readSpeed = _diskReadCounter != null ? Math.Round(_diskReadCounter.NextValue(), 2) : 0.0;
             double writeSpeed = _diskWriteCounter != null ? Math.Round(_diskWriteCounter.NextValue(), 2) : 0.0;
 
-            return new Dictionary<string, double>
+            return (_cachedFreeDiskSpaceMb, readSpeed, writeSpeed);
+        }
+
+        private static int CollectOpenSocketsFast()
+        {
+            try
             {
-                { "freeSpaceMb", freeSpaceMb },
-                { "readBytesPerSec", readSpeed },
-                { "writeBytesPerSec", writeSpeed }
-            };
+                var props = IPGlobalProperties.GetIPGlobalProperties();
+                return props.GetActiveTcpConnections().Length
+                     + props.GetActiveTcpListeners().Length
+                     + props.GetActiveUdpListeners().Length;
+            }
+            catch
+            {
+                return 0;
+            }
         }
 
         public void Dispose()
@@ -271,16 +261,16 @@ namespace TelemetryCollectorService.Core.Collectors
 
             if (_coreCounters != null)
             {
-                foreach (var counter in _coreCounters)
-                    counter.Dispose();
+                foreach (var c in _coreCounters)
+                    c.Dispose();
             }
 
             if (_networkCounters != null)
             {
-                foreach (var pair in _networkCounters.Values)
+                foreach (var (rx, tx) in _networkCounters)
                 {
-                    pair.Rx.Dispose();
-                    pair.Tx.Dispose();
+                    rx.Dispose();
+                    tx.Dispose();
                 }
             }
 
