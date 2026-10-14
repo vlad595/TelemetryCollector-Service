@@ -3,14 +3,19 @@ using TelemetryCollectorService.Core.Interfaces;
 
 namespace TelemetryCollectorService.Core.Models
 {
-    public class DbMetric: IMetricData
+    public class DbMetric : IMetricData
     {
-        public Guid instanceId {get;set;}
-        public DateTime Timestamp {get;set;}
-        public string Environment {get;set;}
-        public int ConnectionsCount {get;set;}
-        public int SlowQueriesCount {get;set;}
-        public double QueryLatency {get;set;}
-        public int DeadlocksCount {get;set;}
+        public Guid instanceId { get; set; }
+        public DateTime Timestamp { get; set; }
+        public string Environment { get; set; }
+        public int ConnectionsCount { get; set; }
+        public int SlowQueriesCount { get; set; }
+        public double QueryLatency { get; set; }
+        public int DeadlocksCount { get; set; }
+
+        public override string ToString()
+        {
+            return $"{this.instanceId} | {this.Timestamp} | {this.Environment} | Connections: {this.ConnectionsCount} | SlowQueries: {this.SlowQueriesCount} | Latency: {this.QueryLatency}ms | Deadlocks: {this.DeadlocksCount}";
+        }
     }
 }
