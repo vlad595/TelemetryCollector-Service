@@ -20,7 +20,7 @@ namespace TelemetryCollectorService.Core.Collectors
 
         private static readonly int[] CandidatePorts =
         {
-            80, 443, 3000, 5000, 5001, 5050, 7000, 7001, 8000, 8080, 8443
+            80, 443, 3000, 5000, 5001, 5050, 5113, 5154, 7000, 7001, 8000, 8080, 8443
         };
 
         public bool IsAvailable()
