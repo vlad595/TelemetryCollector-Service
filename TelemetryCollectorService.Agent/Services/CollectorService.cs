@@ -22,6 +22,13 @@ public class CollectorService : IDisposable
         _apiCollector = new RawAPICollector();
         _postgresCollector = new PostgresCollector();
     }
+    public MachineMetrics CollectMachineMetrics()
+    {
+        if (_osCollector != null && _osCollector.IsAvailable()){
+            return _osCollector.Collect();
+        }
+        else return null;
+    }
 
     public IReadOnlyList<IMetricData> CollectAll()
     {

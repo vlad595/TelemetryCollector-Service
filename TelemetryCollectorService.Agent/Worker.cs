@@ -1,9 +1,11 @@
 using System.Reflection.PortableExecutable;
 using TelemetryCollectorService.Agent.Services;
+using TelemetryCollectorService.Core.Interfaces;
+using TelemetryCollectorService.Core.Models;
 
 namespace TelemetryCollectorService.Agent;
 
-public class Worker(ILogger<Worker> logger) : BackgroundService
+public class Worker(ILogger<Worker> logger, IPublisher machineMetricsPublisher) : BackgroundService
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -12,14 +14,10 @@ public class Worker(ILogger<Worker> logger) : BackgroundService
 
         while (await timer.WaitForNextTickAsync(stoppingToken))
         {
-            var metrics = service.CollectAll();
+            MachineMetrics metrics = service.CollectMachineMetrics();
             if (logger.IsEnabled(LogLevel.Information))
             {
-                Console.Clear();
-                foreach(var metric in metrics)
-                {
-                    Console.WriteLine(metric.ToString());
-                }
+                await machineMetricsPublisher.Publish(metrics);
             }
         }
     }
