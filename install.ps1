@@ -1,6 +1,7 @@
 param(
     [Parameter(Mandatory = $true, Position = 0)]
     [string] $ApiUrl
+    [string] $AgentId
 )
 
 $ErrorActionPreference = 'Stop'
@@ -26,6 +27,7 @@ Copy-Item -Path (Join-Path $unpackDir '*') -Destination $installDir -Recurse -Fo
 
 $settings = Get-Content (Join-Path $installDir 'appsettings.json') -Raw | ConvertFrom-Json
 $settings.ApiUrl = $ApiUrl
+$settings.AgentId = $AgentId
 $settings | ConvertTo-Json -Depth 20 | Set-Content (Join-Path $installDir 'appsettings.json') -Encoding utf8
 
 if (Get-Service -Name $serviceName -ErrorAction SilentlyContinue) {
