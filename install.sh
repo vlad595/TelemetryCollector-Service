@@ -2,6 +2,7 @@
 set -euo pipefail
 
 API_URL="${1:-}"
+AGENT_ID="${2:-}"
 SERVICE_NAME="telemetry-collector-agent"
 INSTALL_DIR="/opt/telemetry-collector-agent"
 ASSET_URL="https://github.com/vlad595/TelemetryCollector-Service/releases/latest/download/telemetry-agent-linux-x64.tar.gz"
@@ -32,6 +33,7 @@ chmod 0755 "$INSTALL_DIR/TelemetryCollectorService.Agent"
 
 cat > /etc/telemetry-collector-agent.env <<EOF
 ApiUrl=$API_URL
+AgentId=$AGENT_ID
 EOF
 chmod 0600 /etc/telemetry-collector-agent.env
 
