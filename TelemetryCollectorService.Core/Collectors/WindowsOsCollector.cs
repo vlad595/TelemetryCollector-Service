@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Configuration;
 using System.Diagnostics;
 using System.IO;
 using System.Management;
@@ -14,6 +15,7 @@ namespace TelemetryCollectorService.Core.Collectors
     [SupportedOSPlatform("windows")]
     public class WindowsOsCollector : IMetricCollctor<MachineMetrics>, IDisposable
     {
+        private string instanceId;
         public string Name { get; set; } = "OS Windows";
         private readonly string _cpuName;
 
@@ -46,8 +48,9 @@ namespace TelemetryCollectorService.Core.Collectors
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool GlobalMemoryStatusEx([In, Out] MEMORYSTATUSEX lpBuffer);
 
-        public WindowsOsCollector()
+        public WindowsOsCollector(string agentId)
         {
+            instanceId = agentId;
             if (!IsAvailable())
                 return;
 
@@ -75,7 +78,7 @@ namespace TelemetryCollectorService.Core.Collectors
 
             return new MachineMetrics
             {
-                instanceId = Guid.NewGuid(),
+                instanceId = Guid.Parse(instanceId),
                 Timestamp = DateTime.UtcNow,
                 Environment = "Prod",
                 CpuName = _cpuName,
@@ -120,7 +123,7 @@ namespace TelemetryCollectorService.Core.Collectors
             }
             catch
             {
-                // Ігноруємо помилки WMI під час старту
+
             }
             return "Unknown CPU";
         }
