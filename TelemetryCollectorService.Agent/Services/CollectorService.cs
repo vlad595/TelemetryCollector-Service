@@ -12,10 +12,10 @@ public class CollectorService : IDisposable
     private readonly RawAPICollector _apiCollector;
     private readonly PostgresCollector _postgresCollector;
 
-    public CollectorService()
+    public CollectorService(IConfiguration configuration)
     {
         if (OperatingSystem.IsWindows())
-            _osCollector = new WindowsOsCollector();
+            _osCollector = new WindowsOsCollector(configuration["AgentId"]);
         else if (OperatingSystem.IsLinux())
             _osCollector = new LinuxOsCollector();
 
