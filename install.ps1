@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory = $true, Position = 0)]
-    [string] $ApiUrl
+    [string] $ApiUrl,
     [string] $AgentId
 )
 

@@ -17,7 +17,7 @@ public class CollectorService : IDisposable
         if (OperatingSystem.IsWindows())
             _osCollector = new WindowsOsCollector(configuration["AgentId"]);
         else if (OperatingSystem.IsLinux())
-            _osCollector = new LinuxOsCollector();
+            _osCollector = new LinuxOsCollector(configuration["AgentId"]);
 
         _apiCollector = new RawAPICollector();
         _postgresCollector = new PostgresCollector();

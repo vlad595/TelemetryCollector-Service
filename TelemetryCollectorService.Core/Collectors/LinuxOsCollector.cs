@@ -12,6 +12,7 @@ namespace TelemetryCollectorService.Core.Collectors
     public class LinuxOsCollector : IMetricCollctor<MachineMetrics>
     {
         public string Name { get; set; } = "OS Linux";
+        private readonly Guid _instanceId;
         private readonly string _cpuName;
 
         private readonly Dictionary<string, (ulong Idle, ulong Total)> _prevCpuStats = new();
@@ -27,8 +28,9 @@ namespace TelemetryCollectorService.Core.Collectors
             "tmpfs", "devtmpfs", "squashfs", "overlay", "proc", "sysfs", "cgroup", "cgroup2fs", "nsfs", "mqueue"
         };
 
-        public LinuxOsCollector()
+        public LinuxOsCollector(string? agentId = null)
         {
+            _instanceId = Guid.TryParse(agentId, out Guid parsedId) ? parsedId : Guid.NewGuid();
             if (!IsAvailable())
                 return;
 
@@ -53,7 +55,7 @@ namespace TelemetryCollectorService.Core.Collectors
 
             return new MachineMetrics
             {
-                instanceId = Guid.NewGuid(),
+                instanceId = _instanceId,
                 Timestamp = DateTime.UtcNow,
                 Environment = "Prod",
                 CpuName = _cpuName,

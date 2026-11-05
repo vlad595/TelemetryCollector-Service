@@ -1,4 +1,6 @@
 using System.Reflection.PortableExecutable;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using TelemetryCollectorService.Agent.Services;
 using TelemetryCollectorService.Core.Interfaces;
 using TelemetryCollectorService.Core.Models;
@@ -17,7 +19,9 @@ public class Worker(ILogger<Worker> logger, IPublisher machineMetricsPublisher, 
             MachineMetrics metrics = service.CollectMachineMetrics();
             if (logger.IsEnabled(LogLevel.Information))
             {
-                await machineMetricsPublisher.Publish(metrics);
+                //var jsonmetrics = JsonSerializer.Serialize(metrics);
+                //Console.WriteLine(jsonmetrics);
+                await machineMetricsPublisher.PublishAsync(metrics);
             }
         }
     }
